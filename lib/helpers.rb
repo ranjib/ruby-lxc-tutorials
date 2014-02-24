@@ -1,15 +1,23 @@
+require 'mixlib/shellout'
 module SpecHelper
   extend self
   def setup_server
     write_key
     configure_chef
-    start_chef_zero unless chef_zero_running?
+    write_knife_config
+    unless chef_zero_running?
+      puts 'Starting chef-zero'
+      start_chef_zero
+    end
     sync_repo
   end
 
   def teardown_server
     FileUtils.rm_rf knife_dir
-    stop_chef_zero if chef_zero_running?
+    if chef_zero_running?
+      stop_chef_zero
+      puts 'Stopped chef-zero'
+    end
   end
 
   def chef_zero_running?
@@ -22,12 +30,17 @@ module SpecHelper
   end
 
   def start_chef_zero
-    @@chef_zero = ChefZero::Server.new(port: 4000, host: ip)
-    @@chef_zero.start_background
+    @@chef_zero ||= ChefZero::Server.new(port: 4000, host: ip)
+    @@chef_zero.start_background(15)
+    until @@chef_zero.running?
+      puts 'Waiting till chef-zero starts'
+      sleep 1
+    end
   end
 
   def stop_chef_zero
     @@chef_zero.stop
+    sleep 3
   end
 
   def write_knife_config
@@ -62,20 +75,23 @@ module SpecHelper
   end
 
   def do_knife(klass, *args)
+    puts "Executing knife: #{klass.name}"
+    klass.load_deps
+    plugin = klass.new
+    plugin.name_args = args
+    yield plugin.config if block_given?
     pid = fork do
-      klass.load_deps
-      plugin = klass.new
-      plugin.name_args = args
-      yield plugin.config if block_given?
       plugin.configure_chef if plugin.respond_to?(:configure_chef)
       plugin.run
     end
-    Process.waitpid pid, 0
+    Process.waitpid pid
+    puts "Finished executing knife: #{klass.name}"# Status: #{status.exitstatus}"
   end
 
   def sync_repo
     do_knife Chef::Knife::Upload, '/' do |config|
-      config[:chef_repo_path] =  '/home/ranjib/workspace/chef-repo'
+      config[:chef_repo_path] =  File.expand_path('../..',__FILE__)
+      puts "Setting repo to:#{config[:chef_repo_path]}"
       config[:force] = true
     end
   end
@@ -85,14 +101,13 @@ module SpecHelper
     ct.create('ubuntu',nil,0,['-r','precise'])
     ct.start
     while ct.ip_addresses.empty?
-      puts "Waiting for ip address allocation for '#{ct.name}' container"
       sleep 1
+      puts "Waiting for ip address allocation for '#{ct.name}' container"
     end
-
     ct.execute do
-      puts `apt-get update -y`
-      puts `apt-get install wget curl -y`
-      puts `curl -L  https://www.opscode.com/chef/install.sh | bash`
+      shell_out!('apt-get update -yfq')
+      shell_out!('apt-get -yqf install curl wget')
+      shell_out!('curl -L https://www.opscode.com/chef/install.sh | bash')
     end
 
     do_knife Chef::Knife::Bootstrap, ct.ip_addresses.first do |config|
@@ -103,7 +118,7 @@ module SpecHelper
       config[:use_sudo] = true
       config[:host_key_verify] = false
       config[:use_sudo_password] = true
-      config[:bootstrap_version] = '11.10.4'
+      config[:yes] = true
     end
   end
 
@@ -117,5 +132,17 @@ module SpecHelper
     end
     ct.stop if ct.running?
     ct.destroy if ct.defined?
+  end
+  def shell_out!(cmd)
+    command = Mixlib::ShellOut.new(cmd)
+    command.live_stream = $stdout
+    command.run_command
+    raise "Failed to execute '#{cmd}'" unless command.exitstatus == 0
+  end
+
+  def knife_exec(cmd)
+    puts ("bundle exec knife #{cmd} -c #{knife_dir}/knife.rb")
+    binding.pry
+    shell_out!("bundle exec knife #{cmd} -c #{knife_dir}/knife.rb")
   end
 end
