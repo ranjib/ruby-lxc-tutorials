@@ -282,5 +282,6 @@ DEPENDENCIES
   chefspec
   irbtools
   lxc-extra!
+  mixlib-shellout
   pry
   serverspec
